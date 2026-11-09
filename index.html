@@ -163,12 +163,20 @@
   <div id="mapwrap">
     <div id="map"></div>
     <div class="legend">
-      <b>Magnitude</b>
+      <b>Shindo 震度 (JMA events)</b>
+      <div class="lg"><i style="background:#5ac8fa"></i> 震度 1</div>
+      <div class="lg"><i style="background:#32ade6"></i> 震度 2</div>
+      <div class="lg"><i style="background:#ffd60a"></i> 震度 3</div>
+      <div class="lg"><i style="background:#ff9f0a"></i> 震度 4</div>
+      <div class="lg"><i style="background:#ff6b22"></i> 震度 5- / 5+</div>
+      <div class="lg"><i style="background:#ff2d55"></i> 震度 6- / 6+</div>
+      <div class="lg"><i style="background:#bf5af2"></i> 震度 7</div>
+      <b style="margin-top:7px">Magnitude (USGS only)</b>
       <div class="lg"><i style="background:#ff375f"></i> M 6+</div>
       <div class="lg"><i style="background:#ff9f0a"></i> M 4.5 – 6</div>
       <div class="lg"><i style="background:#ffd60a"></i> M 3 – 4.5</div>
       <div class="lg"><i style="background:#30d158"></i> below M 3</div>
-      <div style="margin-top:5px">marker size ∝ magnitude</div>
+      <div style="margin-top:5px">JMA: color = max shindo, size = magnitude<br>USGS-only: color &amp; size = magnitude</div>
     </div>
   </div>
 
@@ -298,7 +306,9 @@ function rel(iso){
 }
 function magColor(m){ return m >= 6 ? '#ff375f' : m >= 4.5 ? '#ff9f0a' : m >= 3 ? '#ffd60a' : '#30d158'; }
 function magRadius(m){ const v = (typeof m === 'number' && isFinite(m) && m > 0) ? m : 2.2; return Math.max(4.5, 3.2 + v * 2.7); }
-function isStrong(e){ return (typeof e.mag === 'number' && e.mag >= 5.5) || ['45','50','55','60','70'].includes(String(e.shindo)); }
+// JMA events: color = max seismic intensity (震度), official JMA palette. USGS-only: magnitude colors.
+function eventColor(e){ return e.shindo && SHINDO_COLOR[e.shindo] ? SHINDO_COLOR[e.shindo] : magColor(e.mag == null ? 0 : e.mag); }
+function isStrong(e){ return (typeof e.mag === 'number' && e.mag >= 5.5) || ['5-','5+','6-','6+','7'].includes(String(e.shindo)); }
 function haversine(a, b, c, d){
   const R = 6371, t = x => x * Math.PI / 180, h =
     Math.sin(t(c-a)/2)**2 + Math.cos(t(a)) * Math.cos(t(c)) * Math.sin(t(d-b)/2)**2;
@@ -554,7 +564,7 @@ function popupHtml(e){
     rows.map(r => `<div class="pp-r"><span>${r[0]}</span><b>${r[1]}</b></div>`).join('') + ptsHtml + linkHtml;
 }
 function addMarker(e){
-  const c = magColor(e.mag == null ? 0 : e.mag);
+  const c = eventColor(e);
   const m = L.circleMarker([e.lat, e.lon], {
     radius: magRadius(e.mag), color: c, weight: 1.6, opacity: .95,
     fillColor: c, fillOpacity: .3,
