@@ -151,7 +151,7 @@
   </div>
   <span class="chip"><span class="dot" id="jmaDot"></span><span id="jmaTxt">JMA · connecting</span></span>
   <span class="chip"><span class="dot" id="usgsDot"></span><span id="usgsTxt">USGS · connecting</span></span>
-  <button class="iconbtn" id="soundBtn" title="Toggle alert sound">🔇 Sound off</button>
+  <button class="iconbtn" id="soundBtn" title="Toggle alert sound — EEW-style chime">🔇 Sound off</button>
   <button class="iconbtn" id="diagBtn" title="Run connection diagnostics — tests every data source and shows exactly what fails">🔍 Diagnostics</button>
   <button class="iconbtn" id="histBtn" title="Browse the long-term earthquake archive, statistics and CSV export — served by the backend database">📜 History</button>
   <span id="clock">--:--:-- JST</span>
@@ -369,7 +369,7 @@ function connectWS(){
       if (!seenEew.has(j.uid)) {
         seenEew.add(j.uid); if (seenEew.size > 50) seenEew.delete(seenEew.keys().next().value);
         toast('🚨 Emergency Earthquake Warning (EEW) detected via P2PQuake — shaking possible, follow JMA', 'strong');
-        beep('strong');
+        beep('eew');
       }
     }
     else if (j.code === 552) {                      // tsunami information
@@ -521,7 +521,7 @@ function notify(evt){
   const strong = isStrong(evt);
   toast(`<b>M${evt.mag == null ? '?' : evt.mag.toFixed(1)}</b> ${esc(evt.place)} — ${rel(evt.time)}<small>${evt.source}${evt.shindo ? ' · 震度 ' + evt.shindo : ''}${evt.tsunami === 'Warning' ? ' · ⚠ TSUNAMI' : ''}</small>`,
         strong ? 'strong' : '');
-  beep(strong ? 'strong' : 'soft');
+  beep(alertTier(evt));
 }
 
 // ---------- rendering ----------
@@ -698,24 +698,67 @@ function toast(html, cls){
   $('#toasts').appendChild(el);
   setTimeout(() => el.remove(), 8000);
 }
-function tone(f, st, dur){
+function tone(f, st, dur, vol){
   const t = audioCtx.currentTime + st;
   const o = audioCtx.createOscillator(), g = audioCtx.createGain();
   o.type = 'sine'; o.frequency.setValueAtTime(f, t);
   g.gain.setValueAtTime(0.0001, t);
-  g.gain.exponentialRampToValueAtTime(0.14, t + 0.02);
+  g.gain.exponentialRampToValueAtTime(vol || 0.14, t + 0.02);
   g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
   o.connect(g); g.connect(audioCtx.destination);
   o.start(t); o.stop(t + dur + 0.05);
+}
+function bell(f, st, dur, vol){            // chime timbre: fundamental + faint upper harmonic
+  tone(f, st, dur, vol);
+  tone(f * 2.01, st, dur * 0.6, (vol || 0.14) * 0.25);
+}
+// EEW-style alert, fully synthesized (no audio files): the familiar two-note
+// chime motif x3, then rapid "pipipipi" beeps. rounds=2 for a genuine EEW warning.
+function eewBeeps(st, n, f){ for (let i = 0; i < n; i++) tone(f, st + i * 0.16, 0.1, 0.16); }
+function eewPattern(st, rounds){
+  for (let r = 0; r < rounds; r++){
+    const base = st + r * 5.6;
+    for (let i = 0; i < 3; i++){ bell(740, base + i * 0.84, 0.34, 0.17); bell(880, base + i * 0.84 + 0.42, 0.34, 0.17); }
+    eewBeeps(base + 2.7, 16, 940);
+  }
+}
+// standard phrase: "This is an earthquake early warning. Beware of strong shaking."
+function speakJa(text, delay){
+  try {
+    const pick = () => speechSynthesis.getVoices().find(v => /^ja(-|_)/i.test(v.lang) || /japanese/i.test(v.name));
+    const go = v => setTimeout(() => {
+      try {
+        const u = new SpeechSynthesisUtterance(text);
+        u.lang = 'ja-JP'; u.voice = v; u.rate = 0.95;
+        speechSynthesis.speak(u);
+      } catch {}
+    }, delay);
+    const v = pick();
+    if (v) go(v);
+    else speechSynthesis.addEventListener('voiceschanged', () => { const v2 = pick(); if (v2) go(v2); }, { once: true });
+  } catch {}
 }
 function beep(kind){
   if (!soundOn) return;
   try {
     audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
     if (audioCtx.state === 'suspended') audioCtx.resume();
-    if (kind === 'strong') { tone(660, 0, .16); tone(880, .2, .16); tone(1175, .4, .38); }
+    if (kind === 'eew'){ eewPattern(0, 2); speakJa('緊急地震速報です。強い揺れにご注意ください', 11000); }
+    else if (kind === 'strong'){ eewPattern(0, 1); speakJa('緊急地震速報です。強い揺れにご注意ください', 5600); }
+    else if (kind === 'medium'){ bell(740, 0, .3, .15); bell(880, .4, .3, .15); bell(1175, .8, .5, .15); }
     else tone(520, 0, .18);
   } catch {}
+}
+// alert tier for a new event: 'eew' full alarm / 'strong' one round / 'medium' chime / 'soft' blip
+function alertTier(e){
+  const s = String(e.shindo || ''), m = typeof e.mag === 'number' ? e.mag : null;
+  if (['5-','5+','6-','6+','7'].includes(s) || (m !== null && m >= 6.5)) return 'eew';
+  if (s === '4' || (m !== null && m >= 5)) return 'strong';
+  if (e.source && e.source.includes('JMA')){
+    if (s === '3') return 'medium';
+    if (s === '1' || s === '2') return 'soft';
+  }
+  return m !== null && m >= 4 ? 'medium' : 'soft';
 }
 function updSoundBtn(){ $('#soundBtn').textContent = soundOn ? '🔔 Sound on' : '🔇 Sound off'; }
 
@@ -776,7 +819,7 @@ function boot(){
     soundOn = !soundOn;
     try { localStorage.setItem(LS_SOUND, soundOn ? '1' : '0'); } catch {}
     updSoundBtn();
-    if (soundOn) beep('soft');
+    if (soundOn) beep('medium');        // gesture-unlocks AudioContext + previews the chime
   };
 
   $('#clock').textContent = new Date().toLocaleTimeString('en-GB', { timeZone: 'Asia/Tokyo', hour12: false }) + ' JST';
