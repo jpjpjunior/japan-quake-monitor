@@ -1,0 +1,24 @@
+# OPTIONAL — exposes the dashboard outside the cluster.
+# 1. Change the host below to your DNS name.
+# 2. Requires an Ingress controller (e.g. ingress-nginx); delete this file if you don't use one.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: japan-quake-monitor
+  labels:
+    app: japan-quake-monitor
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: quake.example.com # CHANGE ME
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: japan-quake-monitor
+                port:
+                  number: 80

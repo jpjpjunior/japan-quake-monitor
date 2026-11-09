@@ -1,0 +1,81 @@
+# Japan Quake Monitor — Deployment + Service.
+# Image path points at ghcr.io/jpjpjunior/japan-quake-monitor (built by Actions).
+#
+# If your GHCR package is private, uncomment the imagePullSecrets block below
+# and create the secret as described in the README.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: japan-quake-monitor
+  labels:
+    app: japan-quake-monitor
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app: japan-quake-monitor
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: japan-quake-monitor
+    spec:
+      # imagePullSecrets:
+      #   - name: ghcr-credentials
+      containers:
+        - name: web
+          # Published by the Actions workflow on every push to main.
+          # Pin to a content digest for reproducibility:
+          #   docker buildx imagetools inspect ghcr.io/jpjpjunior/japan-quake-monitor:latest
+          image: ghcr.io/jpjpjunior/japan-quake-monitor:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 101 # uid of the "nginx" user in the unprivileged image
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: japan-quake-monitor
+  labels:
+    app: japan-quake-monitor
+spec:
+  type: ClusterIP
+  selector:
+    app: japan-quake-monitor
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
