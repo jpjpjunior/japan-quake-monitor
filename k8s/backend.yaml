@@ -1,0 +1,95 @@
+# Backend (FastAPI + SQLite) — permanent earthquake archive, statistics and CSV export.
+# SQLite lives on a PersistentVolume at /data; ONE replica by design (single-writer DB).
+# If you ever need to scale out, swap SQLite for Postgres first.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: japan-quake-monitor-data
+  labels:
+    app: japan-quake-monitor-backend
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: japan-quake-monitor-backend
+  labels:
+    app: japan-quake-monitor-backend
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # RWO volume: the old pod must release it before the new one mounts
+  selector:
+    matchLabels:
+      app: japan-quake-monitor-backend
+  template:
+    metadata:
+      labels:
+        app: japan-quake-monitor-backend
+    spec:
+      # imagePullSecrets:
+      #   - name: ghcr-credentials   # only if the backend package stays private
+      containers:
+        - name: api
+          # Published by the Actions `backend` job on every push to main.
+          image: ghcr.io/jpjpjunior/japan-quake-monitor-backend:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: DATA_DIR
+              value: /data
+          readinessProbe:
+            httpGet:
+              path: /api/healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: japan-quake-monitor-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: japan-quake-monitor-backend
+  labels:
+    app: japan-quake-monitor-backend
+spec:
+  type: ClusterIP
+  selector:
+    app: japan-quake-monitor-backend
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

@@ -10,3 +10,21 @@ services:
       interval: 30s
       timeout: 3s
       retries: 3
+
+  # Optional backend: permanent SQLite archive + statistics API.
+  # Dashboard: http://localhost:8080 · API: http://localhost:8000/api/healthz
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: japan-quake-monitor-backend:local
+    ports:
+      - "8000:8000"
+    environment:
+      DATA_DIR: /data
+    volumes:
+      - jqm-data:/data
+    restart: unless-stopped
+
+volumes:
+  jqm-data:

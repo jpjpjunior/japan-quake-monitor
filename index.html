@@ -121,6 +121,19 @@
   .diag-foot{margin-top:12px;display:flex;gap:8px;align-items:center}
   .diag-hint{color:var(--dim);font-size:11px;line-height:1.55;margin-top:10px;border-top:1px solid var(--line);padding-top:8px}
   .diag-hint code{background:var(--panel2);padding:1px 5px;border-radius:4px;font-size:10.5px}
+  #histModal{position:fixed;inset:0;background:rgba(4,8,14,.72);z-index:4000;display:flex;align-items:center;justify-content:center;padding:20px}
+  #histModal[hidden]{display:none}
+  #histTableWrap{overflow-x:auto}
+  .hist-controls{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:10px}
+  .hist-controls select,.hist-controls input{background:var(--panel2);border:1px solid var(--line);color:inherit;border-radius:6px;padding:4px 8px;font-size:12px}
+  .hist-controls input{width:150px}
+  a.iconbtn{display:inline-flex;align-items:center;text-decoration:none}
+  .hstat{display:flex;flex-wrap:wrap;gap:14px;margin:8px 0 2px;font-size:12px;color:var(--dim)}
+  .hstat b{color:inherit;font-size:15px}
+  .htable{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px}
+  .htable th{color:var(--dim);text-align:left;font-weight:600;padding:4px 6px;border-bottom:1px solid var(--line);font-size:10.5px;text-transform:uppercase;letter-spacing:.4px}
+  .htable td{padding:4px 6px;border-bottom:1px solid var(--line);white-space:nowrap}
+  .htable td.place{white-space:normal;line-height:1.35}
   @media (max-width:820px){
     main{flex-direction:column}
     #mapwrap{height:54%;flex:none}
@@ -140,6 +153,7 @@
   <span class="chip"><span class="dot" id="usgsDot"></span><span id="usgsTxt">USGS · connecting</span></span>
   <button class="iconbtn" id="soundBtn" title="Toggle alert sound">🔇 Sound off</button>
   <button class="iconbtn" id="diagBtn" title="Run connection diagnostics — tests every data source and shows exactly what fails">🔍 Diagnostics</button>
+  <button class="iconbtn" id="histBtn" title="Browse the long-term earthquake archive, statistics and CSV export — served by the backend database">📜 History</button>
   <span id="clock">--:--:-- JST</span>
 </header>
 
@@ -197,6 +211,42 @@
     <div id="diagRows"><div class="drow"><span class="dot"></span><span class="rs">Running tests…</span></div></div>
     <div class="diag-foot"><button class="iconbtn" id="diagRerun">↻ Re-run tests</button><button class="iconbtn" id="diagClose" style="margin-left:auto">Close</button></div>
     <div class="diag-hint" id="diagHint"></div>
+  </div>
+</div>
+
+<div id="histModal" hidden>
+  <div class="diag-panel" style="max-width:760px">
+    <h3>History &amp; statistics</h3>
+    <div class="diag-sub">Long-term archive from the backend database — survives browser storage limits and works across devices. The live feeds still stream directly from P2PQuake/USGS.</div>
+    <div style="font-size:12px;margin-bottom:10px"><span id="histApiState" style="color:#9fb0c8">checking backend…</span>
+      <input id="histApiBase" placeholder="backend URL, e.g. https://quakes.example.com" style="display:none">
+      <button class="iconbtn" id="histApiSave" style="display:none">Save</button>
+    </div>
+    <div class="hist-controls">
+      <select id="histDays">
+        <option value="7">Last 7 days</option>
+        <option value="30" selected>Last 30 days</option>
+        <option value="90">Last 90 days</option>
+        <option value="365">Last year</option>
+        <option value="3650">Everything</option>
+      </select>
+      <select id="histSrc">
+        <option value="all">JMA + USGS</option>
+        <option value="JMA">JMA only</option>
+        <option value="USGS">USGS only</option>
+      </select>
+      <select id="histMag">
+        <option value="0">All magnitudes</option>
+        <option value="3">M 3+</option><option value="4">M 4+</option>
+        <option value="4.5">M 4.5+</option><option value="5">M 5+</option><option value="6">M 6+</option>
+      </select>
+      <input id="histQ" placeholder="search place…">
+      <button class="iconbtn" id="histRefresh">↻ Refresh</button>
+      <a class="iconbtn" id="histCsv" href="#" target="_blank" rel="noopener" title="Export the selected time window as CSV">⬇ CSV</a>
+    </div>
+    <div id="histSummary"></div>
+    <div id="histTableWrap"></div>
+    <div class="diag-foot"><button class="iconbtn" id="histClose" style="margin-left:auto">Close</button></div>
   </div>
 </div>
 <div id="toasts"></div>
@@ -730,6 +780,7 @@ function boot(){
 
   pollJMA(100);                          // backfill recent JMA reports
   pollUSGS(USGS_DAY, false);             // backfill 24 h of USGS (Japan box)
+  hydrateFromBackend();                  // optional: pull 30 days of archived history from the backend
   connectWS();                           // live JMA push
   setInterval(() => { if (!wsLive) pollJMA(15); }, 15000);
   setInterval(() => pollUSGS(USGS_HOUR, true), 60000);
@@ -738,6 +789,113 @@ function boot(){
     if (wsLive && Date.now() - lastWsActivity > 15 * 60e3) { try { ws.close(); } catch {} }
   }, 60000);
 }
+
+// ---------- backend history & statistics ----------
+let apiBase = null;             // '' = same origin, URL string = explicit, null = none found
+let apiDiscovered = false;
+async function apiHealth(base, ms){
+  try {
+    const r = await fetchTO((base || '') + '/api/healthz', ms || 8000);
+    if (!r.ok) return null;
+    const j = await r.json();
+    return (j && j.ok) ? j : null;
+  } catch { return null; }
+}
+async function apiDiscover(){
+  if (apiDiscovered) return apiBase;
+  const custom = (localStorage.getItem('jqm_api_base') || '').trim().replace(/\/+$/, '');
+  if (custom) apiBase = (await apiHealth(custom)) ? custom : null;
+  else apiBase = (await apiHealth('')) ? '' : null;   // same-origin: works when the backend serves this page
+  apiDiscovered = true;
+  return apiBase;
+}
+async function hydrateFromBackend(){            // richer boot backfill when a backend exists
+  const base = await apiDiscover();
+  if (base === null) return;
+  try {
+    const r = await fetchTO((base || '') + '/api/events?days=30&limit=400', 15000);
+    if (!r.ok) return;
+    const j = await r.json();
+    for (const e of (j.events || [])) upsertEvent(e, false);
+    renderSoon();
+  } catch {}
+}
+function shindoBadge(s){
+  return s ? '<b style="color:' + (SHINDO_COLOR[s] || '#9fb0c8') + '">' + esc(s) + '</b>' : '—';
+}
+function renderHistSummary(s){
+  const maxC = Math.max(1, ...(s.by_day || []).map(d => d.count));
+  const bars = (s.by_day || []).slice(-60).map(d =>
+    '<span title="' + d.date + ': ' + d.count + ' event(s), max M ' + (d.max_mag == null ? '–' : d.max_mag.toFixed(1)) + '" style="display:inline-block;width:6px;height:' + Math.max(2, Math.round(26 * d.count / maxC)) + 'px;background:' + magColor(d.max_mag || 0) + ';margin-right:2px;border-radius:1px"></span>'
+  ).join('');
+  const prefs = (s.by_pref || []).slice(0, 5).map(p => esc(p.pref) + ' (' + p.count + ')').join(', ');
+  const st = s.strongest;
+  $('#histSummary').innerHTML =
+    '<div class="hstat"><span><b>' + s.total + '</b> announcements</span>' +
+    (st ? '<span>strongest <b>M ' + st.mag.toFixed(1) + '</b> ' + esc(st.place) + ' · ' + fmtJST(st.time) + '</span>' : '') +
+    '</div>' +
+    (bars ? '<div style="margin:6px 0 2px">' + bars + '</div><div style="color:var(--dim);font-size:10.5px;margin-bottom:6px">events per day — bar height ∝ count, color = max magnitude</div>' : '') +
+    (prefs ? '<div style="color:var(--dim);font-size:11.5px">most affected prefectures: ' + prefs + '</div>' : '');
+}
+function renderHistTable(list, total){
+  const rows = list.slice(0, 300).map(e => {
+    const link = e.url ? '<a href="' + esc(e.url) + '" target="_blank" rel="noopener" style="color:#7d90a6">' + esc(e.place) + '</a>' : esc(e.place);
+    const pts = (e.pts || []).slice(0, 3).map(p => p.a + ' ' + p.s).join(' · ');
+    return '<tr><td>' + fmtJST(e.time, true) + '</td>' +
+      '<td style="color:' + magColor(e.mag == null ? 0 : e.mag) + '">' + (e.mag == null ? '–' : 'M ' + e.mag.toFixed(1)) + '</td>' +
+      '<td>' + shindoBadge(e.shindo) + '</td>' +
+      '<td style="color:var(--dim)">' + (e.depth == null ? '–' : e.depth + ' km') + '</td>' +
+      '<td class="place">' + link + (pts ? '<br><span style="color:var(--dim);font-size:10.5px">' + esc(pts) + '</span>' : '') + '</td>' +
+      '<td style="color:var(--dim)">' + e.source + '</td></tr>';
+  }).join('');
+  $('#histTableWrap').innerHTML =
+    '<table class="htable"><thead><tr><th>Time (JST)</th><th>Mag</th><th>Shindo</th><th>Depth</th><th>Place / felt areas</th><th>Src</th></tr></thead><tbody>' +
+    (rows || '<tr><td colspan="6" style="color:var(--dim)">no events match these filters</td></tr>') +
+    '</tbody></table>' +
+    (list.length > 300 ? '<div style="color:var(--dim);font-size:11px;margin-top:6px">showing newest 300 of ' + list.length + ' matched (of ' + total + ' total)</div>' : '');
+}
+async function loadHistory(){
+  const base = await apiDiscover();
+  const state = $('#histApiState');
+  if (base === null) {
+    state.innerHTML = '<span style="color:#ffb340">⚠ no backend connected — standalone mode.</span> To keep a permanent archive, deploy the backend (k8s/backend.yaml) and enter its URL below.';
+    $('#histApiBase').style.display = $('#histApiSave').style.display = 'inline-flex';
+    if (!$('#histApiBase').value) $('#histApiBase').value = localStorage.getItem('jqm_api_base') || '';
+    $('#histSummary').innerHTML = '';
+    $('#histTableWrap').innerHTML = '<div style="color:var(--dim);font-size:12px">Tip: the dashboard still works fully live without a backend — the archive just adds long-term history, statistics and CSV export.</div>';
+    $('#histCsv').removeAttribute('href');
+    return;
+  }
+  state.innerHTML = '<span style="color:#30d158">● backend connected</span>' + (base === '' ? ' (same origin)' : ' — ' + esc(hostOf(base)));
+  $('#histApiBase').style.display = $('#histApiSave').style.display = 'none';
+  const days = $('#histDays').value, src = $('#histSrc').value, mag = $('#histMag').value, q = $('#histQ').value.trim();
+  $('#histTableWrap').innerHTML = '<div style="color:var(--dim)">loading…</div>';
+  try {
+    const r = await fetchTO((base || '') + '/api/events?days=' + days + '&limit=2000&source=' + src + '&minmag=' + mag + (q ? '&q=' + encodeURIComponent(q) : ''), 20000);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    renderHistSummary({ total: j.total, by_day: [], by_pref: [], strongest: null });
+    renderHistTable(j.events || [], j.total);
+    const sr = await fetchTO((base || '') + '/api/stats?days=' + days + '&minmag=' + mag, 20000);
+    if (sr.ok) renderHistSummary(await sr.json());
+    $('#histCsv').href = (base || '') + '/api/export.csv?days=' + days + '&minmag=' + mag;
+  } catch (e) {
+    $('#histTableWrap').innerHTML = '<div style="color:#ff6b6b">backend request failed: ' + esc(timeoutErr(e)) + '</div>';
+  }
+}
+function openHist(){ $('#histModal').hidden = false; loadHistory(); }
+$('#histBtn').onclick = openHist;
+$('#histRefresh').onclick = loadHistory;
+$('#histDays').onchange = $('#histSrc').onchange = $('#histMag').onchange = loadHistory;
+$('#histQ').addEventListener('keydown', e => { if (e.key === 'Enter') loadHistory(); });
+$('#histApiSave').onclick = () => {
+  const v = $('#histApiBase').value.trim().replace(/\/+$/, '');
+  if (v) localStorage.setItem('jqm_api_base', v); else localStorage.removeItem('jqm_api_base');
+  apiDiscovered = false; apiBase = null;
+  loadHistory();
+};
+$('#histClose').onclick = () => { $('#histModal').hidden = true; };
+$('#histModal').addEventListener('click', e => { if (e.target === $('#histModal')) $('#histModal').hidden = true; });
 
 // ---------- diagnostics panel ----------
 function imgProbe(url){
@@ -799,6 +957,16 @@ async function runDiagnostics(){
     : await wsProbe(P2P_WS);
   if (!wsr.ok) wsr.msg += ' — dashboard falls back to 15 s polling automatically';
   add(Object.assign({ name: 'P2PQuake live WebSocket' }, wsr));
+  const hb = await apiDiscover();
+  if (hb !== null) {
+    const hz = await apiHealth(hb);
+    add({ name: 'History backend (optional)', ok: !!hz,
+          msg: hz ? ('connected' + (hb === '' ? ' (same origin)' : ' — ' + hostOf(hb)) + ' — ' + hz.events_total + ' events archived since ' + (hz.history_since || '—').slice(0, 10))
+                  : 'configured but unreachable: ' + (hb === '' ? 'same origin' : hostOf(hb)) });
+  } else {
+    add({ name: 'History backend (optional)', ok: null,
+          msg: 'not configured — standalone mode; deploy the backend and set its URL in the 📜 History panel to enable the permanent archive' });
+  }
   $('#diagHint').innerHTML = (location.protocol === 'file:'
     ? '<b>Opened from disk (file://).</b> Chrome and Edge normally allow these connections; Safari and Firefox can block WebSocket or fetch from file pages. If any test above fails, serve the file instead: <code>python3 -m http.server 8000</code> then open <code>http://localhost:8000/japan-quake-monitor.html</code>.<br>'
     : '') + 'All three upstreams send open CORS headers, so a failure here means something on your side is blocking it — VPN, corporate proxy, firewall, security software or a national network filter. Note: the P2PQuake WebSocket API allows at most 2 live connections per IP address, so several open tabs or devices behind the same router can cause refused handshakes. Hover the JMA / USGS chips in the header for the last live error.';
