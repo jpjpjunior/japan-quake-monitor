@@ -219,7 +219,7 @@ let map, markerLayer;
 const events = new Map();          // id -> event
 const markers = new Map();         // id -> L.circleMarker
 const filters = { mag: 0, win: 24, src: { JMA: true, USGS: true } };
-let ws = null, wsLive = false, wsAttempts = 0, jmaMode = 'connecting', jmaPollOk = null, lastWsActivity = Date.now();
+let ws = null, wsLive = false, wsAttempts = 0, jmaMode = 'connecting', jmaPollOk = null, lastWsActivity = Date.now(), wsOpenedAt = 0;
 let usgsLastOk = null, usgsErr = false;
 let jmaErr = null, usgsErrTxt = null, leafletCdn = null, tileMode = 'osm', tileErrs = 0, tileLayer = null, autoSwitchedTiles = false;
 let soundOn = false, audioCtx = null;
@@ -297,7 +297,7 @@ function connectWS(){
   sock.onopen = () => {
     if (sock !== ws) return;
     clearTimeout(ct);
-    wsLive = true; wsAttempts = 0; jmaMode = 'live'; lastWsActivity = Date.now();
+    wsLive = true; wsAttempts = 0; jmaMode = 'live'; lastWsActivity = wsOpenedAt = Date.now();
     setStatus(); pollJMA(10);            // fill any gap since connect
   };
   sock.onmessage = ev => {
@@ -324,7 +324,7 @@ function connectWS(){
     clearTimeout(ct);
     wsLive = false; wsAttempts++; jmaMode = 'polling'; setStatus();
     pollJMA(10);
-    setTimeout(connectWS, Math.min(60000, 5000 * wsAttempts));
+    setTimeout(connectWS, Math.min(60000, 5000 * wsAttempts) + Math.random() * 4000);
   };
   sock.onerror = () => { try { sock.close(); } catch {} };
 }
@@ -768,7 +768,7 @@ function wsProbe(url){
     try {
       const w = new WebSocket(url);
       w.onopen = () => { try { w.close(); } catch {} fin({ ok: true, msg: 'connected in ' + (Date.now() - t0) + ' ms' }); };
-      w.onerror = () => fin({ ok: false, msg: 'connection refused or blocked (' + hostOf(url) + ')' });
+      w.onerror = () => fin({ ok: false, msg: 'handshake failed (' + hostOf(url) + ') — blocked by your network, or the API\u2019s limit of 2 live WebSocket connections per IP was hit (close other tabs / devices showing this dashboard and retry)' });
       setTimeout(() => fin({ ok: false, msg: 'timed out after 6 s — likely blocked by your network' }), 6000);
     } catch (e) { fin({ ok: false, msg: String(e) }); }
   });
@@ -792,12 +792,16 @@ async function runDiagnostics(){
   add(await jsonProbe('USGS earthquake feed', USGS_DAY, j => (j.features || []).length + ' events · 24 h global'));
   add(Object.assign({ name: 'OSM map tiles (primary)' }, await imgProbe('https://tile.openstreetmap.org/5/28/12.png')));
   add(Object.assign({ name: 'CARTO dark tiles (fallback)' }, await imgProbe('https://a.basemaps.cartocdn.com/dark_all/5/28/12.png')));
-  const wsr = await wsProbe(P2P_WS);
+  // the API allows only 2 concurrent /ws connections per IP — if the dashboard already
+  // holds one, report its state instead of opening a competing second socket
+  const wsr = wsLive
+    ? { ok: true, msg: 'reusing the dashboard\u2019s live connection (open ' + Math.max(1, Math.round((Date.now() - wsOpenedAt) / 1000)) + ' s — no second socket opened, API allows max 2 per IP)' }
+    : await wsProbe(P2P_WS);
   if (!wsr.ok) wsr.msg += ' — dashboard falls back to 15 s polling automatically';
   add(Object.assign({ name: 'P2PQuake live WebSocket' }, wsr));
   $('#diagHint').innerHTML = (location.protocol === 'file:'
     ? '<b>Opened from disk (file://).</b> Chrome and Edge normally allow these connections; Safari and Firefox can block WebSocket or fetch from file pages. If any test above fails, serve the file instead: <code>python3 -m http.server 8000</code> then open <code>http://localhost:8000/japan-quake-monitor.html</code>.<br>'
-    : '') + 'All three upstreams send open CORS headers, so a failure here means something on your side is blocking it — VPN, corporate proxy, firewall, security software or a national network filter. Hover the JMA / USGS chips in the header for the last live error.';
+    : '') + 'All three upstreams send open CORS headers, so a failure here means something on your side is blocking it — VPN, corporate proxy, firewall, security software or a national network filter. Note: the P2PQuake WebSocket API allows at most 2 live connections per IP address, so several open tabs or devices behind the same router can cause refused handshakes. Hover the JMA / USGS chips in the header for the last live error.';
 }
 function openDiag(){ $('#diagModal').hidden = false; runDiagnostics(); }
 $('#diagBtn').onclick = openDiag;
