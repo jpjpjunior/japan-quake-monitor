@@ -9,6 +9,9 @@ permissions:
   contents: read
   packages: write
   pages: write
+  # deploy-pages@v4 exchanges an OIDC token to publish; without this the
+  # final step fails with "Ensure GITHUB_TOKEN has permission id-token: write"
+  id-token: write
 
 # Pages deployments must not interleave. Image builds get their own groups
 # below so two rapid pushes cannot both tag :latest.
