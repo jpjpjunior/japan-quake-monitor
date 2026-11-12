@@ -1,7 +1,7 @@
 # Build context is the repository root (CI sets context: .).
 # The frontend (nginx) and backend (FastAPI) images share this context;
 # each Dockerfile copies only what it needs.
-FROM python:3.12-slim
+FROM python:3.15-slim
 
 RUN useradd --uid 1000 --create-home app
 WORKDIR /app
