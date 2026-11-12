@@ -1,4 +1,4 @@
-name: Build image & deploy Pages
+name: Build images & deploy Pages
 
 on:
   push:
@@ -9,16 +9,56 @@ permissions:
   contents: read
   packages: write
   pages: write
-  id-token: write
 
+# Pages deployments must not interleave. Image builds get their own groups
+# below so two rapid pushes cannot both tag :latest.
 concurrency:
   group: pages
   cancel-in-progress: false
 
 jobs:
+  validate:
+    name: Lint & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install -r backend/requirements.txt pytest pyyaml
+
+      - name: Byte-compile backend
+        run: python -m compileall -q backend
+
+      - name: Parser + merge tests
+        run: python -m pytest backend -q
+        env:
+          DATA_DIR: ${{ runner.temp }}/data
+
+      - name: Validate YAML
+        run: |
+          python - <<'PY'
+          import glob, sys, yaml
+          bad = 0
+          for f in glob.glob('k8s/*.yaml') + glob.glob('.github/**/*.yml', recursive=True):
+              try:
+                  list(yaml.safe_load_all(open(f)))
+              except Exception as e:
+                  print(f'{f}: {e}')
+                  bad = 1
+          sys.exit(bad)
+          PY
+
   docker:
     name: Build & push image to GHCR
+    needs: validate
     runs-on: ubuntu-latest
+    concurrency:
+      group: image-frontend
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
 
@@ -49,7 +89,11 @@ jobs:
 
   backend:
     name: Build & push backend image to GHCR
+    needs: validate
     runs-on: ubuntu-latest
+    concurrency:
+      group: image-backend
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
 
@@ -81,13 +125,15 @@ jobs:
 
   pages:
     name: Deploy static page to GitHub Pages
+    needs: validate
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
-      - run: mkdir -p _site && cp index.html _site/
+      # assets/ must be copied or the alert chime 404s on Pages only
+      - run: mkdir -p _site && cp index.html _site/ && cp -r assets _site/
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site

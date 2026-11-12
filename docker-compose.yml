@@ -12,7 +12,7 @@ services:
       retries: 3
 
   # Optional backend: permanent SQLite archive + statistics API.
-  # Dashboard: http://localhost:8080 · API: http://localhost:8000/api/healthz
+  # Dashboard: http://localhost:8080 . API: http://localhost:8000/api/healthz
   backend:
     build:
       context: .
@@ -22,9 +22,17 @@ services:
       - "8000:8000"
     environment:
       DATA_DIR: /data
+      STATIC_DIR: /app/static
     volumes:
       - jqm-data:/data
     restart: unless-stopped
+    healthcheck:
+      # /livez touches no database, so a transient SQLite lock cannot mark the
+      # container unhealthy. /api/healthz is the richer status for humans.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/livez || exit 1"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
 
 volumes:
   jqm-data:

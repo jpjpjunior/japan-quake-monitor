@@ -11,6 +11,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY backend/main.py .
 COPY index.html static/index.html
+# the alert chime is a separate asset now (no longer inlined in index.html)
+COPY assets/ static/assets/
 
 ENV DATA_DIR=/data \
     STATIC_DIR=/app/static \
