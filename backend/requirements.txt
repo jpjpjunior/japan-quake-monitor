@@ -1,5 +1,5 @@
 # Pinned so two builds a week apart are identical. If a pin fails to resolve,
 # loosen it rather than dropping the pin entirely.
-fastapi==0.115.6
+fastapi==0.162.2
 uvicorn==0.34.0
 httpx==0.28.1
