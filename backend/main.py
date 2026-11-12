@@ -30,7 +30,7 @@ from math import asin, cos, radians, sin, sqrt
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 
@@ -153,26 +153,39 @@ def db():
 def init_db() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with db() as conn:
-        conn.executescript(SCHEMA)
+        # migrate BEFORE the schema: SCHEMA builds indexes on events(ts) and
+        # events(quake_id), which do not exist in a v2 archive yet
         migrate(conn)
+        conn.executescript(SCHEMA)
         link_orphans(conn)
 
 
 def migrate(conn: sqlite3.Connection) -> None:
-    """v2 -> v3: add ts/quake_id to an existing archive and backfill."""
+    """v2 -> v3: add ts/quake_id to an existing archive and backfill.
+
+    Runs BEFORE the schema is created, so a legacy archive gets its columns
+    added before SCHEMA builds indexes on them. A fresh database has no
+    events table yet — skip straight to stamping the version; SCHEMA will
+    create everything in v3 form on the next line of init_db().
+    """
     if conn.execute("PRAGMA user_version").fetchone()[0] >= SCHEMA_VERSION:
         return
-    cols = {r["name"] for r in conn.execute("PRAGMA table_info(events)")}
-    if "ts" not in cols:
-        conn.execute("ALTER TABLE events ADD COLUMN ts INTEGER")
-        conn.execute(
-            "UPDATE events SET ts = CAST(strftime('%s', time) AS INTEGER) * 1000 "
-            "WHERE ts IS NULL"
-        )
-    if "quake_id" not in cols:
-        conn.execute("ALTER TABLE events ADD COLUMN quake_id INTEGER")
+    tables = {r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    if "events" in tables:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(events)")}
+        if "ts" not in cols:
+            conn.execute("ALTER TABLE events ADD COLUMN ts INTEGER")
+            # stored times end in 'Z'; SQLite < 3.38 cannot parse that suffix, so
+            # strip it (bare ISO strings are treated as UTC by date functions)
+            conn.execute(
+                "UPDATE events SET ts = CAST(strftime('%s', REPLACE(time, 'Z', '')) AS INTEGER) * 1000 "
+                "WHERE ts IS NULL"
+            )
+        if "quake_id" not in cols:
+            conn.execute("ALTER TABLE events ADD COLUMN quake_id INTEGER")
+        log.info("migrated archive to schema v%d", SCHEMA_VERSION)
     conn.execute("PRAGMA user_version=%d" % SCHEMA_VERSION)
-    log.info("migrated archive to schema v%d", SCHEMA_VERSION)
 
 
 def set_meta(conn, key: str, value: str) -> None:
@@ -375,10 +388,12 @@ def upsert(conn, events: list) -> tuple:
     for e in events:
         qid = find_quake(conn, e)
         if qid is None:
+            # lat/lon must be present NOW: find_quake skips quake rows with NULL
+            # coordinates, so a bare INSERT would break same-batch twin merging
             conn.execute(
-                "INSERT INTO quakes(time, ts, primary_event_id, primary_source, sources)"
-                " VALUES(?,?,?,?,'[]')",
-                (e["time"], e["ts"], e["id"], e["source"]),
+                "INSERT INTO quakes(time, ts, lat, lon, primary_event_id,"
+                " primary_source, sources) VALUES(?,?,?,?,?,?,'[]')",
+                (e["time"], e["ts"], e["lat"], e["lon"], e["id"], e["source"]),
             )
             qid = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
 
@@ -427,10 +442,12 @@ def link_orphans(conn) -> None:
         e = dict(r)
         qid = find_quake(conn, e)
         if qid is None:
+            # same as upsert(): coordinates must be present during the linking
+            # pass, or later orphans of the same physical quake never merge
             conn.execute(
-                "INSERT INTO quakes(time, ts, primary_event_id, primary_source, sources)"
-                " VALUES(?,?,?,?,'[]')",
-                (e["time"], e["ts"], e["id"], e["source"]),
+                "INSERT INTO quakes(time, ts, lat, lon, primary_event_id,"
+                " primary_source, sources) VALUES(?,?,?,?,?,?,'[]')",
+                (e["time"], e["ts"], e["lat"], e["lon"], e["id"], e["source"]),
             )
             qid = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
         conn.execute("UPDATE events SET quake_id=? WHERE id=?", (qid, e["id"]))
@@ -516,6 +533,8 @@ def quake_to_event(r) -> dict:
     browser can dedupe it against the live feed."""
     sources = json.loads(r["sources"] or "[]")
     others = [s for s in sources if s != r["primary_source"]]
+    keys = r.keys()
+    pts_raw = r["primary_pts"] if "primary_pts" in keys else None
     return {
         "id": r["primary_event_id"],
         "source": r["primary_source"],
@@ -529,7 +548,7 @@ def quake_to_event(r) -> dict:
         "correct": bool(r["correct"]),
         "url": r["url"],
         "also": others,
-        "pts": [],
+        "pts": json.loads(pts_raw)[:40] if pts_raw else [],
     }
 
 
@@ -561,11 +580,16 @@ def build_where(days: float, minmag: float, source: str, q: str, table: str = "q
 
 def query_quakes(days: float, limit: int, minmag: float, source: str,
                  q: str, offset: int):
-    cond, args = build_where(days, minmag, source, q)
+    # alias quakes as q in both statements: the LEFT JOIN aliases events as e,
+    # and build_where's source-filter subquery reuses that alias safely
+    cond, args = build_where(days, minmag, source, q, table="q")
     with db() as conn:
-        total = conn.execute("SELECT COUNT(*) c FROM quakes" + cond, args).fetchone()["c"]
+        total = conn.execute("SELECT COUNT(*) c FROM quakes q" + cond, args).fetchone()["c"]
+        # LEFT JOIN restores the 震度 point list of the primary event (v2 parity)
         rows = conn.execute(
-            "SELECT * FROM quakes" + cond + " ORDER BY ts DESC, id LIMIT ? OFFSET ?",
+            "SELECT q.*, e.pts AS primary_pts FROM quakes q"
+            " LEFT JOIN events e ON e.id = q.primary_event_id" + cond +
+            " ORDER BY q.ts DESC, q.id LIMIT ? OFFSET ?",
             args + [limit, offset],
         ).fetchall()
     return total, rows
@@ -605,6 +629,21 @@ def index():
     return Response("dashboard not bundled - serve index.html separately", status_code=404)
 
 
+_ASSET_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+@app.get("/assets/{name}")
+def asset(name: str):
+    """Static assets (the alert chime) for backend-served dashboards; the
+    nginx image serves /assets/ from its own docroot."""
+    if not _ASSET_NAME.match(name):
+        raise HTTPException(status_code=404)
+    f = STATIC_DIR / "assets" / name
+    if not f.is_file():
+        raise HTTPException(status_code=404)
+    return FileResponse(f, headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+
 @app.get("/livez")
 def livez():
     """Liveness: no database access, so a transient lock cannot kill the pod."""
@@ -623,11 +662,15 @@ def healthz():
         last_ok = {"p2p": get_meta(conn, "last_p2p_ok"),
                    "usgs": get_meta(conn, "last_usgs_ok")}
 
-    stale_after = 5 * max(P2P_INTERVAL, USGS_INTERVAL)
+    # per-collector staleness: a collector is stale after missing 5 of ITS OWN
+    # intervals (usgs_day beats every 600s, so a single global window would
+    # flag a perfectly healthy collector every 5th minute)
+    intervals = {"p2p": P2P_INTERVAL, "usgs": USGS_INTERVAL, "usgs_day": USGS_DAY_INTERVAL}
     now = datetime.now(timezone.utc)
     uptime = (now - STARTED_AT).total_seconds()
     stale = {}
     for k, v in beats.items():
+        stale_after = 5 * intervals.get(k, USGS_INTERVAL)
         if not v:
             # no beat yet: not stale while the first cycles are still due
             stale[k] = uptime > stale_after

@@ -29,7 +29,8 @@ services:
     healthcheck:
       # /livez touches no database, so a transient SQLite lock cannot mark the
       # container unhealthy. /api/healthz is the richer status for humans.
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/livez || exit 1"]
+      # python:3.12-slim has no wget — probe with the stdlib instead.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/livez', timeout=3)"]
       interval: 30s
       timeout: 3s
       retries: 3
